@@ -1,0 +1,460 @@
+<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><link rel="icon" href="data:">
+<title>VR東尋坊コースター - VR-Tojinbo-Coaster</title>
+<style>
+body {
+	margin: 0;
+}
+</style>
+</head>
+<body>
+<!-- Import maps polyfill -->
+<!-- Remove this when import maps will be widely supported -->
+<script async src="https://unpkg.com/es-module-shims@1.3.6/dist/es-module-shims.js"></script>
+
+<script type="importmap">
+{
+	"imports": {
+		"three": "https://code4fukui.github.io/three.js/build/three.module.js",
+		"three/addons/": "https://code4fukui.github.io/three.js/examples/jsm/"
+	}
+}
+</script>
+
+<script type="module">
+import * as THREE from "three";
+import { Curve, makeCurve, addCoaster } from "./TojinboCoaster.js";
+import { VRButton } from "three/addons/webxr/VRButton.js";
+import { WindNode } from "./WindNode.js";
+import { setVBMode } from "./setVBMode.js";
+
+const vbmode = location.hash == "#vbmode";
+
+// wind audio
+let context = null;
+let audionode = null;
+
+const stop = async () => {
+  if (!context) return;
+  await context.close();
+  context = null;
+	audionode = null;
+};
+
+const start = async () => {
+  if (context) await stop();
+  const sampleRate = 48000; // mac default
+  context = new AudioContext({ sampleRate });
+
+  const node = await WindNode.create(context);
+  const fn = "./wind.wav";
+  node.setWaveFile(fn);
+  node.setOverwrap(0.058);
+  node.connect(context.destination);
+	audionode = node;
+	
+  //node.setVolume(range.value);
+  //node.setPitch(range2.value);
+};
+
+//
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(window.devicePixelRatio);
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.outputEncoding = THREE.sRGBEncoding;
+renderer.xr.enabled = true;
+renderer.xr.setReferenceSpaceType("local");
+document.body.appendChild(renderer.domElement);
+const btn = VRButton.createButton(renderer);
+btn.addEventListener("click", () => {
+	start();
+});
+document.body.appendChild(btn);
+window.addEventListener("resize", () => {
+	camera.aspect = window.innerWidth / window.innerHeight;
+	camera.updateProjectionMatrix();
+	renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+const scene = new THREE.Scene();
+
+//const curve = makeCurve();
+const curve = new Curve();
+//await addCoaster(scene, curve, true);
+await addCoaster(scene, curve);
+
+if (vbmode) {
+	setVBMode(scene);
+}
+
+const train = new THREE.Object3D();
+scene.add(train);
+const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 500);
+// カメラをbinormalの正の方向に配置
+// 通常区間：binormalは下なので、カメラは下（+0.6）= レールの下から上を見る
+// ループ区間：binormalは内向きなので、カメラは内側（+0.6）= 内側から外を見る
+camera.position.set(0, 0.6, 0);
+train.add(camera);
+
+const position = new THREE.Vector3();
+const tangent = new THREE.Vector3();
+const lookAt = new THREE.Vector3();
+
+// 状態管理（シンプルに1つの変数で管理）
+const STATE = {
+  STOPPED: 'stopped',   // 停止中（スタート地点）
+  RUNNING: 'running',   // 走行中
+};
+let coasterState = STATE.STOPPED;
+
+let velocity = 0;
+let progress = 0;
+let prevProgress = 0;
+
+// 上を見つめる時間計測用
+let lookingUpTime = 0;
+const LOOK_UP_THRESHOLD = 3000; // 3秒（ミリ秒）
+
+// 発車時刻
+let startTime = 0;
+
+let prevTime = performance.now();
+
+// マウス操作用の変数
+let mouseYaw = 0; // 左右の回転
+let mousePitch = 0; // 上下の回転
+let isPointerLocked = false;
+
+// マウスの移動を追跡
+renderer.domElement.addEventListener('mousemove', (event) => {
+	if (isPointerLocked) {
+		const sensitivity = 0.002;
+		mouseYaw -= event.movementX * sensitivity;
+		mousePitch -= event.movementY * sensitivity;
+		
+		// 上下の回転を制限（-90度から+90度）
+		mousePitch = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, mousePitch));
+	}
+});
+
+// クリックでポインターロックと発車/停止
+renderer.domElement.addEventListener('click', () => {
+	if (!isPointerLocked) {
+		renderer.domElement.requestPointerLock();
+	}
+	if (coasterState === STATE.STOPPED) {
+		start();
+		coasterState = STATE.RUNNING;
+		velocity = 0.00045; // 初速度（3/4）
+		startTime = performance.now(); // 発車時刻を記録
+		console.log("発車！");
+	} else if (coasterState === STATE.RUNNING) {
+		coasterState = STATE.STOPPED;
+		velocity = 0;
+		startTime = 0;
+		console.log("停止");
+	}
+});
+
+// ポインターロックの状態を追跡
+document.addEventListener('pointerlockchange', () => {
+	isPointerLocked = document.pointerLockElement === renderer.domElement;
+	if (!isPointerLocked) {
+		console.log("マウス操作終了（ESCキーで解除）");
+	} else {
+		console.log("マウスで視点を操作できます / スペースキーで停止/発車");
+	}
+});
+
+const handles = await addCoaster(scene, curve);
+let isNight = false;
+
+// スペースキーで発車/停止を切り替え
+document.addEventListener('keydown', (event) => {
+	if (event.code === 'Space') {
+		event.preventDefault(); // ページのスクロールを防ぐ
+		if (coasterState === STATE.STOPPED) {
+			start();
+			coasterState = STATE.RUNNING;
+			velocity = 0.00045; // 初速度（3/4）
+			startTime = performance.now(); // 発車時刻を記録
+			console.log("発車！");
+		} else if (coasterState === STATE.RUNNING) {
+			coasterState = STATE.STOPPED;
+			velocity = 0;
+			startTime = 0;
+			console.log("停止");
+		}
+	}
+
+	// 追加：Nキーで空の明暗トグル
+  	 if (event.code === 'KeyN') {
+    isNight = !isNight;
+    // 画像だけ暗くしたい → handles.setSkyBrightness(isNight ? 0.015 : 1.0);
+    // 光も弱めたい → handles.setNight(isNight);
+    handles.setNight(isNight);
+  	}
+});
+
+const NIGHT_HOLD_MS    = 1500;  // 何ms見続けたら切替（1.5秒）
+const Y_DOWN_THRESHOLD = -0.65; // 「下向き」判定（約40度以上）
+const TOGGLE_COOLDOWN  = 1500;  // 連続誤作動を防ぐクールダウン(ms)
+
+let nightMode = false;     // 現在の夜モード状態
+let lookDownHold = 0;      // 下向き累積時間
+let lastNightToggleAt = 0; // 直近トグル時刻
+
+function updateNightModeVR(delta /* ms */, time /* ms */) {
+  if (!renderer.xr.isPresenting) {
+    lookDownHold = 0;
+    return;
+  }
+
+  // 走行中は切替えないならこれでOK
+  if (coasterState === STATE.RUNNING) {
+    lookDownHold = 0;
+    return;
+  }
+
+  // VRカメラの前方ベクトル
+  const vrCam = renderer.xr.getCamera(camera);
+  const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(vrCam.quaternion);
+
+  const canToggle = (time - lastNightToggleAt) > TOGGLE_COOLDOWN;
+
+  if (forward.y < Y_DOWN_THRESHOLD) {
+    // 下向き
+    lookDownHold += delta;
+
+    if (canToggle && lookDownHold >= NIGHT_HOLD_MS) {
+      nightMode = !nightMode;
+      lastNightToggleAt = time;
+      lookDownHold = 0;
+
+      // ← addCoaster の戻り値
+      handles.setNight(nightMode);
+      console.log(nightMode ? "🌙 Night mode ON" : "☀️ Night mode OFF");
+    }
+  } else {
+    // しきい値から外れたらリセット
+    lookDownHold = 0;
+  }
+}
+
+renderer.setAnimationLoop(() => {
+	const time = performance.now();
+	const delta = time - prevTime;
+
+	// 速度の範囲
+	const vmin = 0.00018; // 最小速度（3/4）
+	const vmax = 0.0009; // 最大速度（3/4）
+
+	// 1周したことを検出
+	const hasLooped = prevProgress > 0.8 && progress < 0.2;
+	
+	// 1周したら自動停止してスタート地点に戻る
+	if (hasLooped && coasterState === STATE.RUNNING) {
+		coasterState = STATE.STOPPED;
+		velocity = 0;
+		progress = 0; // スタート地点に戻る
+		startTime = 0; // リセット
+		
+		// 1周完了時は看板を「スタート」に戻す
+		if (scene.userData.signControl && scene.userData.signControl.isGoal) {
+			scene.userData.signControl.updateTexture(scene.userData.signControl.texture, 'スタート');
+			scene.userData.signControl.material.emissiveMap = scene.userData.signControl.texture;
+			scene.userData.signControl.isGoal = false;
+			console.log("看板を「スタート」に変更しました");
+		}
+		
+		console.log("1周完了！スタート地点に戻りました。3秒間上を見て再スタートできます");
+	}
+
+	prevProgress = progress;
+	
+	// 移動中のみprogressを更新
+	if (coasterState === STATE.RUNNING) {
+		progress += velocity;
+		progress = progress % 1;
+	}
+
+	position.copy(curve.getPointAt(progress));
+	// trainの位置はレールの位置そのまま（カメラはtrainのローカル座標系で-0.6オフセット）
+	train.position.copy(position);
+	tangent.copy(curve.getTangentAt(progress));
+
+	// 移動中のみ速度を計算
+	if (coasterState === STATE.RUNNING) {
+		velocity -= tangent.y * 0.00000045 * delta; // 加速度係数（3/4）
+		velocity = Math.max(vmin, Math.min(vmax, velocity));
+	}
+
+	// VRモードで上を見つめる時間を計測（停止中のみ）
+	if (renderer.xr.isPresenting && coasterState === STATE.STOPPED) {
+		// VRカメラの向きを取得
+		const vrCamera = renderer.xr.getCamera(camera);
+		const cameraDirection = new THREE.Vector3(0, 0, -1);
+		cameraDirection.applyQuaternion(vrCamera.quaternion);
+		
+		// 上を見ているかチェック（Y成分が0.7以上なら上向き、約45度以上）
+		if (cameraDirection.y > 0.7) {
+			lookingUpTime += delta;
+			
+			// 3秒間上を見続けたら発車
+			if (lookingUpTime >= LOOK_UP_THRESHOLD) {
+				start();
+				coasterState = STATE.RUNNING;
+				velocity = 0.00045; // 初速度（3/4）
+				startTime = time; // 発車時刻を記録
+				lookingUpTime = 0;
+				console.log("上を見つめて発車しました！");
+			} else {
+				// 進行状況を表示（0.1秒ごと）
+				if (Math.floor(lookingUpTime / 100) !== Math.floor((lookingUpTime - delta) / 100)) {
+					console.log(`上を見つめています... ${(lookingUpTime / 1000).toFixed(1)}秒 / 3秒`);
+				}
+			}
+		} else {
+			// 上を見るのをやめたらリセット
+			if (lookingUpTime > 0) {
+				console.log("上を見るのをやめました");
+			}
+			lookingUpTime = 0;
+		}
+	} else {
+		// VRモードでない、または走行中の場合は時間をリセット
+		lookingUpTime = 0;
+	}
+
+	updateNightModeVR(delta, time);
+
+
+	// カメラを進行方向に向ける（VRモードでない場合）
+	if (!renderer.xr.isPresenting) {
+		// ループ区間でのupベクトルの計算
+		let upVector = new THREE.Vector3(0, 1, 0);
+		
+		if (progress >= curve.loopStart && progress <= curve.loopEnd) {
+			// ループ内での進行度
+			const loopProgress = (progress - curve.loopStart) / (curve.loopEnd - curve.loopStart);
+			const loopAngle = -Math.PI / 2 + loopProgress * Math.PI * 2;
+			
+			// ループの開始点での通常コースの位置
+			const tScaledStart = curve.loopStart * Math.PI;
+			const dx = Math.cos(tScaledStart * 4) * 4;
+			const dy = Math.cos(tScaledStart * 10) * 10;
+			const dz = -Math.sin(tScaledStart * 2) * 2;
+			
+			const dirLength = Math.sqrt(dx * dx + dy * dy + dz * dz);
+			const forwardX = dx / dirLength;
+			const forwardY = dy / dirLength;
+			const forwardZ = dz / dirLength;
+			
+			const worldUpX = 0, worldUpY = 1, worldUpZ = 0;
+			const rightX = forwardY * worldUpZ - forwardZ * worldUpY;
+			const rightY = forwardZ * worldUpX - forwardX * worldUpZ;
+			const rightZ = forwardX * worldUpY - forwardY * worldUpX;
+			
+			const rightLength = Math.sqrt(rightX * rightX + rightY * rightY + rightZ * rightZ);
+			const normRightX = rightX / rightLength;
+			const normRightY = rightY / rightLength;
+			const normRightZ = rightZ / rightLength;
+			
+			const localUpX = normRightY * forwardZ - normRightZ * forwardY;
+			const localUpY = normRightZ * forwardX - normRightX * forwardZ;
+			const localUpZ = normRightX * forwardY - normRightY * forwardX;
+			
+			// ループの中心から外側への方向を計算
+			const radialX = forwardX * Math.cos(loopAngle) + localUpX * Math.sin(loopAngle);
+			const radialY = forwardY * Math.cos(loopAngle) + localUpY * Math.sin(loopAngle);
+			const radialZ = forwardZ * Math.cos(loopAngle) + localUpZ * Math.sin(loopAngle);
+			
+			// 内向き = upベクトル（binormalと一致）
+			upVector.set(-radialX, -radialY, -radialZ).normalize();
+		}
+		
+		// 正しい座標系を構築
+		// forward = tangent (進行方向 = Z軸の逆)
+		// up = upVector (頭の方向 = Y軸)
+		// right = tangent × upVector (右方向 = X軸)
+		const forward = tangent.clone().normalize();
+		const right = new THREE.Vector3().crossVectors(forward, upVector).normalize();
+		const up = new THREE.Vector3().crossVectors(right, forward).normalize();
+		
+		// 回転行列を作成（Three.jsのカメラは-Z方向を見る）
+		const matrix = new THREE.Matrix4();
+		matrix.makeBasis(right, up, forward.clone().negate());
+		train.quaternion.setFromRotationMatrix(matrix);
+		
+		// マウス操作による追加の回転をカメラに適用
+		camera.rotation.set(mousePitch, mouseYaw, 0);
+	}
+
+	// 看板の文字切り替え（発車から3秒経過で「ゴール」）
+	if (scene.userData.signControl) {
+		const signControl = scene.userData.signControl;
+		
+		// 発車から3秒経過したら「ゴール」に切り替え
+		if (coasterState === STATE.RUNNING && startTime > 0 && (time - startTime) >= 3000 && !signControl.isGoal) {
+			signControl.updateTexture(signControl.texture, 'ゴール');
+			signControl.material.emissiveMap = signControl.texture;
+			signControl.isGoal = true;
+			console.log("看板を「ゴール」に変更しました");
+		}
+		// 「スタート」への切り替えは1周完了時のみ（上記の1周検出処理で行う）
+	}
+
+	// 布のアニメーション
+	if (scene.userData.animatedMeshes) {
+		scene.userData.animatedMeshes.forEach(mesh => {
+			if (mesh.userData.isCloth) {
+				mesh.userData.time += delta * 0.001;
+				const t = mesh.userData.time;
+				
+				const geometry = mesh.geometry;
+				const positions = geometry.attributes.position;
+				const originalPositions = geometry.userData.originalPositions;
+				
+				// 各頂点を波打たせる（下半分のみ）
+				for (let i = 0; i < positions.count; i++) {
+					const i3 = i * 3;
+					const x = originalPositions[i3];
+					const y = originalPositions[i3 + 1];
+					
+					// 上半分（y > 0）は固定、下半分（y <= 0）のみ動かす
+					if (y <= 0) {
+						// y座標に応じて動きの強さを変える（上部:0 → 下部:1）
+						const heightFactor = Math.abs(y / 5); // 0から1の範囲
+						
+						// 風による波の効果
+						const wave1 = Math.sin(x * 0.3 + t * 2) * 0.4;
+						const wave2 = Math.cos(y * 0.4 + t * 1.5) * 0.3;
+						const wave3 = Math.sin(x * 0.2 + y * 0.3 + t * 2.5) * 0.5;
+						
+						// Z軸方向に波打たせる（高さによって強度を調整）
+						positions.setZ(i, (wave1 + wave2 + wave3) * heightFactor);
+					} else {
+						// 上半分は元の位置に固定（チェーンに接続されている）
+						positions.setZ(i, originalPositions[i3 + 2]);
+					}
+				}
+				
+				positions.needsUpdate = true;
+				geometry.computeVertexNormals();
+			}
+		});
+	}
+
+	renderer.render(scene, camera);
+	prevTime = time;
+
+	if (audionode) {
+		const vp = (velocity - vmin) / (vmax - vmin);
+		const pitch = 1 + vp;
+		const vol = 0.3 + vp * .3;
+		audionode.setPitchVolume(pitch, vol);
+	}
+});
+</script>
+
+</body>
+</html>
