@@ -88,12 +88,14 @@ if (vbmode) {
 
 const train = new THREE.Object3D();
 scene.add(train);
+
+// VRモード対応: カメラの親オブジェクト（rig）を作成してオフセット
+const cameraRig = new THREE.Object3D();
+cameraRig.position.set(0, 1.1, 0);
+train.add(cameraRig);
+
 const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 500);
-// カメラをbinormalの正の方向に配置
-// 通常区間：binormalは下なので、カメラは下（+0.6）= レールの下から上を見る
-// ループ区間：binormalは内向きなので、カメラは内側（+0.6）= 内側から外を見る
-camera.position.set(0, 0.6, 0);
-train.add(camera);
+cameraRig.add(camera);
 
 const position = new THREE.Vector3();
 const tangent = new THREE.Vector3();
@@ -165,9 +167,6 @@ document.addEventListener('pointerlockchange', () => {
 	}
 });
 
-const handles = await addCoaster(scene, curve);
-let isNight = false;
-
 // スペースキーで発車/停止を切り替え
 document.addEventListener('keydown', (event) => {
 	if (event.code === 'Space') {
@@ -185,60 +184,7 @@ document.addEventListener('keydown', (event) => {
 			console.log("停止");
 		}
 	}
-
-	// 追加：Nキーで空の明暗トグル
-  	 if (event.code === 'KeyN') {
-    isNight = !isNight;
-    // 画像だけ暗くしたい → handles.setSkyBrightness(isNight ? 0.015 : 1.0);
-    // 光も弱めたい → handles.setNight(isNight);
-    handles.setNight(isNight);
-  	}
 });
-
-const NIGHT_HOLD_MS    = 1500;  // 何ms見続けたら切替（1.5秒）
-const Y_DOWN_THRESHOLD = -0.65; // 「下向き」判定（約40度以上）
-const TOGGLE_COOLDOWN  = 1500;  // 連続誤作動を防ぐクールダウン(ms)
-
-let nightMode = false;     // 現在の夜モード状態
-let lookDownHold = 0;      // 下向き累積時間
-let lastNightToggleAt = 0; // 直近トグル時刻
-
-function updateNightModeVR(delta /* ms */, time /* ms */) {
-  if (!renderer.xr.isPresenting) {
-    lookDownHold = 0;
-    return;
-  }
-
-  // 走行中は切替えないならこれでOK
-  if (coasterState === STATE.RUNNING) {
-    lookDownHold = 0;
-    return;
-  }
-
-  // VRカメラの前方ベクトル
-  const vrCam = renderer.xr.getCamera(camera);
-  const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(vrCam.quaternion);
-
-  const canToggle = (time - lastNightToggleAt) > TOGGLE_COOLDOWN;
-
-  if (forward.y < Y_DOWN_THRESHOLD) {
-    // 下向き
-    lookDownHold += delta;
-
-    if (canToggle && lookDownHold >= NIGHT_HOLD_MS) {
-      nightMode = !nightMode;
-      lastNightToggleAt = time;
-      lookDownHold = 0;
-
-      // ← addCoaster の戻り値
-      handles.setNight(nightMode);
-      console.log(nightMode ? "🌙 Night mode ON" : "☀️ Night mode OFF");
-    }
-  } else {
-    // しきい値から外れたらリセット
-    lookDownHold = 0;
-  }
-}
 
 renderer.setAnimationLoop(() => {
 	const time = performance.now();
@@ -324,10 +270,7 @@ renderer.setAnimationLoop(() => {
 		// VRモードでない、または走行中の場合は時間をリセット
 		lookingUpTime = 0;
 	}
-
-	updateNightModeVR(delta, time);
-
-
+	
 	// カメラを進行方向に向ける（VRモードでない場合）
 	if (!renderer.xr.isPresenting) {
 		// ループ区間でのupベクトルの計算
