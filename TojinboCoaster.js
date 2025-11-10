@@ -408,6 +408,8 @@ export const addCoaster = async (
   modelurl = "https://code4fukui.github.io/vr-tojinbo/tojinbo-base1.glb",
   modelpos = null,
 ) => {
+  let material = null;
+  let mesh = null;
   if (skyurl) { // sky
     //const url = "https://code4fukui.github.io/vr-fukui/img/vr-tojinbo.jpg";
     const url = skyurl;
@@ -418,8 +420,11 @@ export const addCoaster = async (
     geometry.scale(-1, 1, 1);
     const texture = new THREE.TextureLoader().load(url);
     texture.colorSpace = THREE.SRGBColorSpace; // three.js r150+ の推奨設定
-    const material = new THREE.MeshBasicMaterial({ map: texture});
-    const mesh = new THREE.Mesh(geometry, material);
+    material = new THREE.MeshBasicMaterial({ 
+      map: texture,
+      color: new THREE.Color(1, 1, 1) // ← 0.5で半分の明るさ（夜っぽい）
+ });
+    mesh = new THREE.Mesh(geometry, material);
     mesh.rotation.y = Math.PI;
     
     /*
@@ -447,6 +452,79 @@ export const addCoaster = async (
   scene.add(glb.scene);
 
 
+    // ===== 夜空 =====
+  const nightSky = new THREE.Group();
+  nightSky.visible = false; // 夜だけ表示
+  scene.add(nightSky);
+
+  // 星
+  function makeStars(count, radius, size = 1.0, opacity = 0.85) {
+    const geom = new THREE.BufferGeometry();
+    const pos = new Float32Array(count * 3);
+    for (let i = 0; i < count; i++) {
+      // 球殻上にランダム散布
+      const u = Math.random();
+      const v = Math.random();
+      const theta = 2 * Math.PI * u;
+      const phi = Math.acos(2 * v - 1);
+      const r = radius;
+      const x = r * Math.sin(phi) * Math.cos(theta);
+      const y = r * Math.cos(phi);
+      const z = r * Math.sin(phi) * Math.sin(theta);
+      if (Math.random() > (y / radius)) continue;
+      pos[i * 3 + 0] = x;
+      pos[i * 3 + 1] = y;
+      pos[i * 3 + 2] = z;
+    }
+    geom.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+
+    const mat = new THREE.PointsMaterial({
+      color: 0xffffff,
+      size,
+      sizeAttenuation: false,  // 遠景でも粒を均一に
+      transparent: true,
+      opacity,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    });
+
+    return new THREE.Points(geom, mat);
+  }
+
+  const starsFar  = makeStars(1600, 295, 0.9, 0.82);
+  const starsNear = makeStars(800,  270, 1.2, 0.75);
+  nightSky.add(starsFar, starsNear);
+
+  // ===== API =====
+  function setSkyBrightness(v) {
+    if (material) {
+      material.color.setScalar(v); // 乗算で暗く
+      material.needsUpdate = true;
+    }
+  }
+
+  function setModelBrightness(v) {
+    obj.traverse((child) => {
+      if (child.isMesh && child.material && child.material.color) {
+        child.material.color.setScalar(v);
+        child.material.needsUpdate = true;
+      }
+    });
+  }
+
+  function setNight(on) {
+    // 空＆モデルの暗さ
+    setSkyBrightness(on ? 0.03 : 1.0); 
+    setModelBrightness(on ? 0.55 : 1.0);
+
+    // ライティングを夜寄りに
+    light.color.set(on ? 0x8899ff : 0xfff0f0);
+    light.groundColor.set(on ? 0x000022 : 0x606066);
+    light.intensity = on ? 0.25 : 1.0;
+
+    // 夜空の表示切替
+    nightSky.visible = on;
+  }
 
   // カスタムレールジオメトリを作成
   {
@@ -498,110 +576,25 @@ export const addCoaster = async (
     scene.add(leftRailMesh);
     scene.add(rightRailMesh);
     
-    const sleeperURL = '/models/sleeper.glb';
-
-    try {
-      const sleepLoader = new PromiseGLTFLoader();
-      let sleeperProto = (await sleepLoader.promiseLoad(sleeperURL)).scene;
-
-      // 見た目調整
-      sleeperProto.traverse(o => {
-        if (o.isMesh) {
-          o.castShadow = o.receiveShadow = true;
-          if (o.material?.map) o.material.map.colorSpace = THREE.SRGBColorSpace;
-        }
-      });
-
-      // 原点を中心へ
-      {
-        const box = new THREE.Box3().setFromObject(sleeperProto);
-        const c = box.getCenter(new THREE.Vector3());
-        const g = new THREE.Group();
-        sleeperProto.position.sub(c);
-        g.add(sleeperProto);
-        g.updateMatrixWorld(true);
-        sleeperProto = g;
-      }
-
-      // スケール係数を計算
-      const baseBox = new THREE.Box3().setFromObject(sleeperProto);
-      const baseSize = baseBox.getSize(new THREE.Vector3());
-      const baseLenX = baseSize.x;
-
-      const extra = 0.40;
-      const targetLen = railSeparation + extra;
-      const kUniform = targetLen / baseLenX;
-      const visualScale = 1.05;
+    // 横木（枕木）を追加
+    const tieGeometry = new THREE.BoxGeometry(railSeparation + 0.4, 0.1, 0.2);
+    const tieMaterial = new THREE.MeshPhongMaterial({ color: 0x654321 });
     
-      // 4) 敷設
-      const step = 10;
-      for (let i = 0; i < railSegments; i += step) {
-        const t = i / railSegments;
+    for (let i = 0; i < railSegments; i += 10) {
+      const t = i / railSegments;
+      const pos = curve.getPointAt(t);
+      const tangent = curve.getTangentAt(t);
+      const binormal = curve.getBinormalAt ? curve.getBinormalAt(t) : new THREE.Vector3(0, 1, 0);
+      const normal = new THREE.Vector3().crossVectors(binormal, tangent).normalize();
       
-        // 左右レールの中点
-        const L = leftRailCurve.getPoint(t);
-        const R = rightRailCurve.getPoint(t);
-        const center = new THREE.Vector3().addVectors(L, R).multiplyScalar(0.5);
+      const tie = new THREE.Mesh(tieGeometry, tieMaterial);
+      tie.position.copy(pos);
+      tie.up.copy(binormal);
+      tie.lookAt(pos.clone().add(tangent));
       
-        // 枕木の右方向（長手）= 左右差ベクトル
-        const right = new THREE.Vector3().subVectors(R, L).normalize();
-        // 上方向 = コースの binormal（なければ世界Up）
-        const up = curve.getBinormalAt ? curve.getBinormalAt(t) : new THREE.Vector3(0, 1, 0);
-        // 前方向 = right × up（右手系）
-        const forward = new THREE.Vector3().crossVectors(right, up).normalize();
-      
-        // 変換行列 = T * R （スケールは“最初の一回のみ”適用済み）
-        const T  = new THREE.Matrix4().makeTranslation(center.x, center.y, center.z);
-        const Rm = new THREE.Matrix4().makeBasis(right, up, forward.negate()); // -Z注視系に合わせるなら negate
-
-        const S = new THREE.Matrix4().makeScale(
-          kUniform * visualScale,
-          kUniform * visualScale,
-          kUniform * visualScale
-        );
-      
-        const tie = sleeperProto.clone(true);
-        tie.matrixAutoUpdate = false;
-        tie.matrix.multiplyMatrices(T, Rm).multiply(S);
-
-        scene.add(tie);
-      }
-    
-        } catch (e) {
-          console.error('[sleeper GLB] load failed, fallback to BoxGeometry.', e);
-        
-          const tieGeometry = new THREE.BoxGeometry(1, 1, 1);
-          const tieMaterial = new THREE.MeshStandardMaterial({ color: 0x654321, metalness: 0, roughness: 0.75 });
-        
-          const extra = 0.40, step = 10;
-        
-          for (let i = 0; i < railSegments; i += step) {
-            const t = i / railSegments;
-            const L = leftRailCurve.getPoint(t);
-            const R = rightRailCurve.getPoint(t);
-            const center = new THREE.Vector3().addVectors(L, R).multiplyScalar(0.5);
-          
-            const span   = new THREE.Vector3().subVectors(R, L);
-            const length = span.length() + extra;
-            const right  = span.clone().normalize();
-          
-            const up = curve.getBinormalAt ? curve.getBinormalAt(t) : new THREE.Vector3(0, 1, 0);
-            const forward = new THREE.Vector3().crossVectors(right, up).normalize();
-          
-            const T  = new THREE.Matrix4().makeTranslation(center.x, center.y, center.z);
-            const Rm = new THREE.Matrix4().makeBasis(right, up, forward.negate());
-            const S  = new THREE.Matrix4().makeScale(length, 0.1, 0.2); // 高さ/奥行きは固定
-          
-            const M = new THREE.Matrix4().multiplyMatrices(T, Rm).multiply(S);
-          
-            const tie = new THREE.Mesh(tieGeometry, tieMaterial);
-            tie.matrixAutoUpdate = false;
-            tie.matrix.copy(M);
-            scene.add(tie);
-          }
+      scene.add(tie);
     }
   }
-
   { // lifter
     const geometry = new RollerCoasterLiftersGeometry(curve, 50);
     const material = new THREE.MeshPhongMaterial();
@@ -915,5 +908,17 @@ export const addCoaster = async (
       scene.add(rightLight);
     }
   }
+
+ // === Night / Day 切替関数 ===
+    return {
+    light,
+    material: material,
+    mesh: mesh,
+    model: obj,
+    nightSky,
+    setSkyBrightness,
+    setModelBrightness,
+    setNight,
+  };
 
 };
