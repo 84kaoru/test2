@@ -93,6 +93,9 @@ const cameraRig = new THREE.Object3D();
 cameraRig.position.set(0, 1.1, 0);
 train.add(cameraRig);
 
+const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 500);
+cameraRig.add(camera);
+
 const position = new THREE.Vector3();
 const tangent = new THREE.Vector3();
 const lookAt = new THREE.Vector3();
@@ -318,7 +321,6 @@ renderer.setAnimationLoop(() => {
 	}
 
 	updateNightModeVR(delta, time);
-
 
 
 	// ループ区間でのupベクトルの計算
