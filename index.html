@@ -240,8 +240,8 @@ renderer.setAnimationLoop(() => {
 	const delta = time - prevTime;
 
 	// 速度の範囲
-	const vmin = 0.00018; // 最小速度（3/4）
-	const vmax = 0.0009; // 最大速度（3/4）
+	const vmin = 0.0009; // 最小速度（3/4）
+	const vmax = 0.00045; // 最大速度（3/4）
 
 	// 1周したことを検出
 	const hasLooped = prevProgress > 0.8 && progress < 0.2;
