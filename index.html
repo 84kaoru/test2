@@ -271,8 +271,6 @@ renderer.setAnimationLoop(() => {
 		lookingUpTime = 0;
 	}
 	
-	// カメラを進行方向に向ける（VRモードでない場合）
-	if (!renderer.xr.isPresenting) {
 		// ループ区間でのupベクトルの計算
 		let upVector = new THREE.Vector3(0, 1, 0);
 		
@@ -328,6 +326,7 @@ renderer.setAnimationLoop(() => {
 		matrix.makeBasis(right, up, forward.clone().negate());
 		train.quaternion.setFromRotationMatrix(matrix);
 		
+	if (!renderer.xr.isPresenting) {
 		// マウス操作による追加の回転をカメラに適用
 		camera.rotation.set(mousePitch, mouseYaw, 0);
 	}
